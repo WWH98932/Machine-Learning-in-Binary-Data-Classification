@@ -1,0 +1,514 @@
+---
+title: "Untitled"
+author: "Minxuan Wang"
+date: "2018年5月12日"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Load packages
+library(ggplot2) # visualization
+#install.packages("ggrepel")
+library(ggrepel)
+#install.packages("ggthemes")
+library(ggthemes) # visualization
+library(scales) # visualization
+library(dplyr) # data manipulation
+#install.packages("VIM")
+library(VIM)
+library(data.table)
+#install.packages("formattable")
+library(formattable)
+#install.packages("plotly")
+library(plotly)
+library(corrplot)
+#install.packages("GGally")
+library(GGally)
+library(caret)
+library(car)
+```
+
+# 1 Introduction
+## 1.1 Data Description
+The dataset is from Kaggle website. It contains 28 variables for 5043 movies, spanning across 100 years in 66 countries. There are 2399 unique director names, and thousands of actors/actresses. “imdb_score” is the response variable while the other 27 variables are possible predictors.
+The original dataset has been replaced in Kaggle, here’s the link for the original dataset from Dataworld:
+https://data.world/data-society/imdb-5000-movie-dataset
+
+## 1.2 Problem Statement (to be edited)
+
+
+# 2 Data cleaning and exploration
+## 2.1 Load data
+```{r}
+setwd("D:/Spring Quarter/412")
+IMDB <- read.csv("movie_metadata.csv")
+str(IMDB)
+```
+# 2.2 Remove Duplicates
+去掉重复数据
+```{r}
+# duplicate rows
+sum(duplicated(IMDB))
+# delete duplicate rows
+IMDB <- IMDB[!duplicated(IMDB), ]
+```
+# 2.3 Split Genres
+一个电影的类型有好多种（动作/冒险等），不好准确定位，我偏好的方法是用第一个种类来表示该电影的种类，例如"Action|Adventure|Fantasy|Sci-Fi"就是Action，需要先把该列"genres"分隔开，再把生成的新的第一列替换原genres列。网上有人采用另外的方法例如把所有的电影类型都计入(用dummy variable)表示，然后形成一个新的表，例如第一部电影"Action|Adventure|Fantasy|Sci-Fi"就同时属于这四种电影类别，然后通过比较各种类电影的打分发现均值几乎一样因此判断电影种类不影响评分所以直接把这列去掉了，略有不妥。所以但目前还是先用我的这种替换的方法。。。
+```{r}
+genres <- data.frame(do.call('rbind', strsplit(as.character(IMDB$genres),'|',fixed=TRUE)))
+IMDB$genres <- genres$X1
+```
+# 2.4 Missing Values
+看每一列缺失值各有多少，heatmap可视化
+```{r}
+colSums(sapply(IMDB, is.na))
+missing.values <- aggr(IMDB, sortVars = T, prop = T, sortCombs = T, cex.lab = 1.5, cex.axis = .6, cex.numbers = 5, combined = F, gap = -.2)
+```
+# 2.5 Remove Variables
+主要考虑分类中是否有某一类占绝大多数的情况，如"Color", "language"等，这样就可以当作常量去掉
+## 2.5.1 color
+```{r}
+table(IMDB$color)
+```
+几乎全是有色电影，所以可以不考虑颜色的区别
+```{r}
+# delete predictor color
+IMDB <- subset(IMDB, select = -c(color))
+```
+## 2.5.2 language
+```{r}
+table(IMDB$language)
+```
+和color一样，language几乎都为英语，所以可以去掉
+```{r}
+IMDB <- subset(IMDB, select = -c(language))
+```
+同上，aspect_ratio(长宽比)也可以去掉
+```{r}
+IMDB <- subset(IMDB, select = -c(aspect_ratio))
+```
+
+## 2.5.3 country
+```{r}
+table(IMDB$country)
+```
+USA占大部分，但是国家应该包含在内，不能简单地去掉，还有一个问题就是，gross和budget并未统一单位为美元，还有利率变化等影响，所以把非美国地区算作一类。
+```{r}
+levels(IMDB$country) <- c(levels(IMDB$country), "Others")
+IMDB$country[(IMDB$country != 'USA')] <- 'Others' 
+IMDB$country <- factor(IMDB$country)
+table(IMDB$country)
+```
+
+## 2.5.4 进一步筛选
+我们发现1980年以前的电影很少，而且对早期电影的打分经常偏高，所以作为outlier去掉
+```{r}
+ggplot(IMDB, aes(x = title_year)) +
+        geom_histogram(aes(fill = ..count..), binwidth =0.5) +
+        labs(x = "Year of release", y = "Movie Count", title = "Histogram of Movie released") +
+        scale_fill_gradient("Count", low = "blue", high = "red") +
+        theme(plot.title = element_text(hjust = 0.5)) 
+```
+
+```{r}
+IMDB <- IMDB[IMDB$title_year >= 1980,]
+```
+
+另外如导演/演员姓名，海报关键词，IMDB链接,电影评级等,不能用作predictor
+```{r}
+IMDB <- subset(IMDB, select = -c(director_name, actor_2_name, actor_1_name,
+                                 movie_title, actor_3_name, plot_keywords, 
+                                 movie_imdb_link, content_rating))
+```
+
+发现一些数据如facebook的likes有很多是0，不代表真正的点赞为0而是导演/影片没有Facebook主页，对于这些0值用整体均值代替(除了facenumber_in_poster)。
+```{r}
+# convert 0s into NAs for predictors "Facebook likes"
+IMDB[,c(3,4,5,9,15,17)][IMDB[,c(3,4,5,9,15,17)] == 0] <- NA
+# impute missing value with column mean
+IMDB$director_facebook_likes[is.na(IMDB$director_facebook_likes)] <- round(mean(IMDB$director_facebook_likes, na.rm = TRUE))
+IMDB$actor_3_facebook_likes[is.na(IMDB$actor_3_facebook_likes)] <- round(mean(IMDB$actor_3_facebook_likes, na.rm = TRUE))
+IMDB$actor_1_facebook_likes[is.na(IMDB$actor_1_facebook_likes)] <- round(mean(IMDB$actor_1_facebook_likes, na.rm = TRUE))
+IMDB$cast_total_facebook_likes[is.na(IMDB$cast_total_facebook_likes)] <- round(mean(IMDB$cast_total_facebook_likes, na.rm = TRUE))
+IMDB$actor_2_facebook_likes[is.na(IMDB$actor_2_facebook_likes)] <- round(mean(IMDB$actor_2_facebook_likes, na.rm = TRUE))
+IMDB$movie_facebook_likes[is.na(IMDB$movie_facebook_likes)] <- round(mean(IMDB$movie_facebook_likes, na.rm = TRUE))
+```
+
+去掉缺失值
+```{r}
+IMDB <- na.omit(IMDB)
+sapply(IMDB, function(x) sum(is.na(x))) # double check for missing values
+```
+
+# 2.6 Visualization
+到此我们数据的清理就基本完成了，看一下IMDB分数的整体情况。
+```{r}
+ggplot(IMDB, aes(x = imdb_score)) +
+        geom_histogram(aes(fill = ..count..), binwidth =0.5) +
+        labs(x = "Score", y = "Movie Count") +
+        ggtitle("Histogram of Movie IMDB Score") +
+        scale_fill_gradient("Count", low = "blue", high = "red") + 
+        theme(plot.title = element_text(hjust = 0.5))
+```
+
+# 3. Multiple regression model
+在这一步我们要预测的是numerical的IMDB打分值，所以在这一步保留numerical的值作为y
+## 3.1 检查多重共线性和异方差性
+通过相关系数矩阵看哪些自变量有显著的相关性(一般认为>0.7是显著相关)
+```{r}
+ggcorr(IMDB, label = TRUE, label_round = 2, label_size = 2, size = 2, hjust = .85) +
+  ggtitle("Correlation Heatmap") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+通过相关系数矩阵发现actor_1_facebook_likes和cast_total_facebook_likes为0.95，actor_2_facebook_likes和cast_total_facebook_likes为0.64，总体actor和cast的Facebook likes都比较相关，另外num_voted_users, num_user_for_reviews和num_critic_for_reviews相关性也较高，因此接下来在构造线性回归模型时采用逐步回归，尽量减弱多重共线性对参数估计的影响。
+## 3.2 Construct Model
+Boxplot for Genres
+```{r}
+fill <- "Blue"
+line <- "Red"
+ggplot(IMDB, aes(x = genres, y = imdb_score)) +
+        geom_boxplot(fill = fill, colour = line) +
+        scale_y_continuous(name = "IMDB Score",
+                           breaks = seq(0, 11, 0.5),
+                           limits=c(0, 11)) +
+        scale_x_discrete(name = "Genres") +
+        ggtitle("Boxplot of IMDB Score and Genres") + 
+        theme(plot.title = element_text(hjust = 0.5), 
+                           axis.text.x  = element_text(angle = 90,
+                           size = 10))
+```
+可以看到action，adventure，comedy和drama的outlier较多。
+```{r}
+summary(IMDB$genres)
+```
+Boxplot for year
+```{r}
+fill <- "Blue"
+line <- "Red"
+ggplot(IMDB, aes(x = as.factor(title_year), y = imdb_score)) +
+        geom_boxplot(fill = fill, colour = line) +
+        scale_y_continuous(name = "IMDB Score",
+                           breaks = seq(1.5, 10, 0.5),
+                           limits=c(1.5, 10)) +
+        scale_x_discrete(name = "title_year") +
+        ggtitle("Boxplot of IMDB Score and Genres") + 
+        theme(plot.title = element_text(hjust = 0.5), 
+                           axis.text.x  = element_text(angle = 90,
+                           size = 10))
+```
+不同年份电影均值有所差异.
+## 3.2.1 设置初始模型
+```{r}
+null <- lm(IMDB$imdb_score ~ 1) # set null model
+summary(null)
+```
+
+## 3.2.2 linear model
+```{r}
+str(IMDB)
+table(IMDB$content_rating)
+table(IMDB$imdb_score)
+```
+
+```{r}
+full1 <- lm(IMDB$imdb_score ~ IMDB$num_critic_for_reviews+IMDB$duration+IMDB$director_facebook_likes+IMDB$actor_3_facebook_likes+IMDB$actor_1_facebook_likes+IMDB$gross+IMDB$num_voted_users+IMDB$cast_total_facebook_likes+IMDB$facenumber_in_poster+IMDB$num_user_for_reviews+IMDB$budget+IMDB$title_year+IMDB$actor_2_facebook_likes+IMDB$movie_facebook_likes+factor(IMDB$genres)+factor(IMDB$country))
+summary(full1)
+```
+```{r}
+step(null, scope = list(lower = null, upper = full1), direction = 'forward')
+```
+这里没有尝试添加高次项和交互项，但是理论上应该添加进行比较，比如探究评论用户的数量是否可以通过改变演员的Facebook点赞来影响打分，之前在相关系数图中看到部分项之间相关性较大，可能会允许作为交互项出现。
+
+## 3.2.3 Diagonastic
+诊断多重共线性：VIF
+```{r}
+model1 <- lm(formula = IMDB$imdb_score ~ IMDB$num_voted_users + factor(IMDB$genres) + 
+    factor(IMDB$country) + IMDB$duration + IMDB$num_user_for_reviews + 
+    IMDB$num_critic_for_reviews + IMDB$title_year + IMDB$gross + 
+    IMDB$actor_3_facebook_likes + IMDB$facenumber_in_poster + 
+    IMDB$actor_1_facebook_likes)
+vif(model1)
+```
+基本认为不存在多重共线性。
+残差拟合图
+```{r}
+plot(model1)
+```
+感觉拟合效果没那么好，可能原因是这种方法需要假设iid及正态分布，后面尝试Ridge Regression和LASSO。
+
+# 4. Logistic Regression ######理论介绍，这个我复制的，待修改#######
+In the Default dataset, where the response variable falls into two categories (yes or no in this case). Rather than modeling the response Y directly, logistic regression models the probability that Y belongs to a particular category. Therefore, in our case with the Default data, the logistic regression models the probability of defaulting. For example, the probability of default given balance can be written as
+\[Pr(default = Yes|balance)\]
+where the values range from 0 to 1. Then for any given value of balance, a prediction can be made for default. For example, we could predict that default = yes for any person whose predicted probability of defaulting is > 0.5. Yet, we can use these probabilities in various fashions. For example, a company who wishes to conservatively predict individuals who are at risk of default could choose a lower probability threshold, say > 0.1.
+Logistic regression uses the logistic function fitted by maximum likelihood. The logistic function will always produce an S-shaped curve, so regardless of the value of x, we will always return a sensible prediction. To interpret the model we can rearrange the equation so that we return the __odds_. Odds are traditionally used instead of probabilities in horse-racing, since they relate more naturally to the correct betting strategy. Taking the log of the equation simplifies it further. Now it looks similar to what we have seen in linear regression.
+\[log(p(X) / 1-p(X)) = β0 + β1X\]
+The left hand side is now the log-odds or logit. Instead of linear regression where one unit change in the response variable Y results in one unit change of X, in logistic regression, increasing X by one unit changes the log odds by \(β1\). Since the probability response is not a straight line, the amount of change one unit has across values of X changes depending on the value of X. However, if \(β1\) is positive, then increasing X will result in an increase in probability, and vice-versa.
+## 4.1 设置Binary Response Variable
+有时候我们不需要去预测影片具体的分数是多少，只期望得到基本的好坏评价，而基本的Logistic回归是二分的，也就是相应变量为TRUE/FALSE，对应我们的IMDB评分为numerical的，所以我们需要通过转换来把评分变为二分变量。最直观的角度就是判断一个电影是佳作还是一般及以下，我们简单地用7分作为分界，设7分以上的电影为佳作，7分以下的为“一般及以下”。
+先看看以7分为界上下的电影的数量
+```{r}
+high_score <- subset(IMDB, IMDB$imdb_score >= 7)
+low_score <- subset(IMDB, IMDB$imdb_score < 7)
+```
+看到“佳作”有1249部，“一般及以下”有2504部，以7分界可行。
+创建一个列，构造binary variable
+```{r}
+IMDB$binary_score <- ifelse(IMDB$imdb_score >= 7, 1, 0)
+IMDB_2 <- subset(IMDB, select = -c(imdb_score))
+```
+
+## 4.2 构造回归
+首先把自变量中的分类变量转变为dummy variable
+```{r}
+library(dummies)
+# Country
+dum_country <- dummy(IMDB_2$country)
+dum_country <- as.data.frame(dum_country)
+names(dum_country)
+# Genres
+dum_genres <- dummy(IMDB_2$genres)
+dum_genres <- as.data.frame(dum_genres)
+names(dum_genres)
+dumdt <- cbind(dum_country, dum_genres)
+```
+放回到IMDB_2中，替换原来的那两列
+```{r}
+IMDB_2 <- cbind(IMDB_2, dumdt)
+IMDB_2$country = NULL
+IMDB_2$genres = NULL
+str(IMDB_2)
+```
+
+multiple logistic regression
+```{r}
+model2 <- glm(binary_score ~ ., data = IMDB_2, family = "binomial")
+summary(model2)
+```
+NA值是作为baseline的dummy，只看显著项，解释如下：其他条件保持一致，movie Facebook likes一单位的变化，IMDB评分是佳片的log odds就上升2.182e-05，blablabla......同时发现电影类型在这并不显著
+
+## 4.3 测试精度(实际上这步可以放在最后统一比较精度)
+分割数据
+```{r}
+library(caTools)
+set.seed(88)
+split <- sample.split(IMDB_2$binary_score, SplitRatio = 0.75)
+#get training and test data
+IMDB_train <- subset(IMDB_2, split == TRUE)
+IMDB_test <- subset(IMDB_2, split == FALSE)
+table(IMDB_test$binary_score)
+```
+
+```{r}
+model2_train <- glm(binary_score ~ num_critic_for_reviews + duration + actor_3_facebook_likes + actor_1_facebook_likes + gross + num_voted_users + cast_total_facebook_likes + facenumber_in_poster + num_user_for_reviews + title_year + actor_2_facebook_likes + movie_facebook_likes + countryUSA, data = IMDB_train, family = "binomial")
+summary(model2_train)
+predict_logit <- predict(model2_train, data = IMDB_train, type = 'response')
+
+#ROC Curve 用ROC曲线选取最佳阈值
+#install.packages("pROC")
+library(pROC)
+modelroc <- roc(IMDB_train$binary_score, predict_logit)
+plot(modelroc, print.auc=TRUE, auc.polygon=TRUE, grid=c(0.1, 0.2),
+     grid.col=c("green", "red"), max.auc.polygon=TRUE,
+     auc.polygon.col="skyblue", print.thres=TRUE)
+```
+这样判断出阈值最佳在0.337,即我们把计算出概率大于0.337的都算作1，小于0.337的都算作0，预测精度在76.6%左右
+```{r}
+#confusion matrix
+table(IMDB_train$binary_score, predict_logit > 0.337)
+predict.results <- ifelse(predict_logit > 0.337, 1, 0)
+misClasificError <- mean(predict.results != IMDB_train$binary_score)
+print(paste('Accuracy of Multiple Logistic Model is', 1 - misClasificError))
+```
+
+# 这段理论解释复制的，简单讲就是曲线下的面积越大你和精度越高，多以我们要设置
+Receiver Operating Characteristic(ROC) summarizes the model’s performance by evaluating the trade offs between true positive rate (sensitivity) and false positive rate(1- specificity). For plotting ROC, it is advisable to assume p > 0.5 since we are more concerned about success rate. ROC summarizes the predictive power for all possible values of p > 0.5.  The area under curve (AUC), referred to as index of accuracy(A) or concordance index, is a perfect performance metric for ROC curve. Higher the area under curve, better the prediction power of the model. Below is a sample ROC curve. The ROC of a perfect predictive model has TP equals 1 and FP equals 0. This curve will touch the top left corner of the graph.
+
+对test set实验
+```{r}
+model2_test <- glm(binary_score ~ num_critic_for_reviews + duration + actor_3_facebook_likes + actor_1_facebook_likes + gross + num_voted_users + cast_total_facebook_likes + facenumber_in_poster + num_user_for_reviews + title_year + actor_2_facebook_likes + movie_facebook_likes + countryUSA, data = IMDB_test, family = "binomial")
+predict_logit_2 <- predict(model2_test, data = IMDB_test, type = 'response')
+
+#ROC Curve
+modelroc_2 <- roc(IMDB_test$binary_score, predict_logit_2)
+plot(modelroc_2, print.auc=TRUE, auc.polygon=TRUE, grid=c(0.1, 0.2),
+     grid.col=c("green", "red"), max.auc.polygon=TRUE,
+     auc.polygon.col="skyblue", print.thres=TRUE)
+
+#confusion matrix
+table(IMDB_test$binary_score, predict_logit_2 > 0.337)
+predict.results <- ifelse(predict_logit_2 > 0.337, 1, 0)
+misClasificError <- mean(predict.results != IMDB_test$binary_score)
+print(paste('Accuracy of Multiple Logistic Model is', 1 - misClasificError))
+```
+Test set的预测精度在76.9%左右
+
+# 5 Ridge Regression model
+在第一步构造回归模型时，我们发现在变量间可能存在较高的相关性，存在多重共线性的影响，那么除了我使用的逐步回归的方法，还可以使用Ridge Regression。## 加入理论介绍##
+ridge regression无法像linear那样自动处理分类变量，所以首先把分类变量处理为dummy，我们已经有了IMDB_2，只需把最初的imdb_score项加入形成新的数据集
+```{r}
+IMDB_3 <- cbind(IMDB_2, IMDB[, 16])
+colnames(IMDB_3)[34] <- "imdb_score"
+```
+
+尝试full linear model
+```{r}
+# linear regression
+model0 <- lm(imdb_score ~ . - binary_score, data = IMDB)
+summary(model0)
+vif(model0)
+```
+发现存在很高的多重共线性，那么怎么处理呢？不能直接去掉。
+
+## 5.1 Ridge Regression
+
+## 5.1.1 用MASS包的lm.ridge
+```{r}
+library(MASS)
+model3 <- lm.ridge(imdb_score ~ . - binary_score, IMDB_3, lambda = seq(0,0.1,0.001))
+select(model3)
+```
+最优λ为0.1
+
+## 5.1.2用ridge包中的linearRidge()函数进行自动选择岭回归参数
+```{r}
+#install.packages("ridge")
+library(ridge)
+model4 <- linearRidge(imdb_score ~ . - binary_score, data = IMDB_3)
+summary(model4)
+```
+从模型运行结果看，最优λ为0.022，各自变量的系数显著性发生了变化
+
+##5.1.3 使用caret包中的train函数
+先用train函数对参数进行调优，首先设置交互校验和参数调优范围，这里我们使用10层交互校验。为了保险起见，在用此类方法前应进行标准化
+```{r}
+trainx1 <- IMDB_3[, -c(15, 34)] 
+trainy1 <- IMDB_3[, 34]
+
+ctr1 <- trainControl(method = "cv", number = 10)
+ridgeGrid <- data.frame(.lambda=seq(0, .1, length = 10))
+set.seed(100)
+ridgeRegTune <- train(trainx1, trainy1, method = "ridge",
+#用不同罚函数值来拟合模型
+tuneGrid = ridgeGrid, trControl = ctr1,
+#中心化和标度化变量
+preProc = c("center","scale"))
+ridgeRegTune
+```
+最优λ为0
+
+## 5.1.4 使用gmnet包的cv.glmnet，(cv = cross-validation)
+```{r}
+library(glmnet)
+#运用交叉验证的方法选择最优的岭回归
+set.seed(1) 
+x <- model.matrix(imdb_score ~ . - binary_score, IMDB_3)[, -1]
+y <- IMDB_3$imdb_score
+cv_fit <- cv.glmnet(x, y, alpha = 0)
+plot(cv_fit)
+names(cv_fit)
+bestlam <- cv_fit$lambda.min
+bestlam
+predict(cv_fit, type = 'coefficients', s = bestlam)
+model5 <- cv_fit$glmnet.fit
+summary(model5)
+```
+最优λ为0.054
+我们发现不同的方法λ的选择有区别，但是都很接近0，所以只要λ离0不远就行
+
+## 5.2 拟合精度
+```{r}
+score_predicted <- predict(model5, s = bestlam, newx = x)
+
+# Sum of Squares Total and Error
+sst <- sum((y - mean(y))^2)
+sse <- sum((score_predicted - y)^2)
+
+# R squared
+R_square <- 1 - sse / sst
+print(paste('R^2 of Ridge Regressioni Model is', R_square))
+summary(model1)
+```
+
+# 6 LASSO
+###### 理论介绍#######
+## 6.1 LASSO model 
+我们依然使用glmnet
+```{r}
+cv_fitlas <- cv.glmnet(x, y, alpha = 1)
+plot(cv_fitlas)
+bestlam_las <- cv_fitlas$lambda.min
+bestlam_las
+
+predict(cv_fitlas, type = 'coefficients', s = bestlam)
+
+model6 <- cv_fitlas$glmnet.fit
+summary(model6)
+```
+## 6.2 精度
+```{r}
+score_predicted_las <- predict(model6, s = bestlam, newx = x)
+
+# Sum of Squares Total and Error
+sst <- sum((y - mean(y))^2)
+sse_lasso <- sum((score_predicted_las - y)^2)
+
+# R squared
+R_square_las <- 1 - sse_lasso / sst
+print(paste('R^2 of LASSO Model is', R_square_las))
+```
+
+# 7 Decision Tree
+##### 理论介绍 #####
+
+##7.1 
+使用logistic回归中的数据集，即只有binary_score的，并将之作为y
+对于train set
+```{r}
+library(rpart)
+#install.packages("rattle")
+library(rattle)
+model7 <- rpart(binary_score ~ ., data = IMDB_train, method = "class")
+fancyRpartPlot(model7, main = NULL, sub = NULL)
+```
+######## 对树的结果进行解释 !!!!!!########
+
+## 7.2 对tree进行剪枝 
+使用cross-validation procedure,根据使cross-validation error (xerror)最小的cp值进行prune
+```{r}
+# Prune the tree
+plotcp(model7)
+model8 <- prune(model7, cp = model7$cptable[which.min(model7$cptable[,"xerror"]),"CP"])
+fancyRpartPlot(model8, main = NULL, sub = NULL)
+
+# Predict the values of the train set
+pred_train <- predict(model8, IMDB_train, type = "class")
+```
+
+精度检测
+```{r}
+# Construct the confusion matrix: conf
+conf_train <- table(IMDB_train$binary_score, pred_train)
+conf_train
+
+# Print out the accuracy
+#sum(diag(conf_train))/sum(conf_train)
+print(paste('Accuracy of Decision Tree Model(Train) is', sum(diag(conf_train))/sum(conf_train)))
+```
+
+## 7.3 Test set
+```{r}
+pred_test <- predict(model8, IMDB_test, type = "class")
+conf_test <- table(IMDB_test$binary_score, pred_test)
+conf_test
+
+# Print out the accuracy
+#sum(diag(conf_train))/sum(conf_train)
+print(paste('Accuracy of Decision Tree Model(Test) is', sum(diag(conf_test))/sum(conf_test)))
+```
+
+讨论一下各模型的优缺点，检验的差距大不大，精度哪个最高。比如线性回归的只能比较R2大小，如果把线性回归预测值>0.5的算做1，<0.5的算作0来进行二分变量比较，精度肯定相当高(我没试，感觉的)
+
